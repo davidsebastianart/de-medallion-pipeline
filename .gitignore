@@ -1,0 +1,27 @@
+# Environment & Secrets
+.env
+*.env
+
+# Airflow runtime files & logs
+logs/
+airflow.cfg
+airflow.db
+webserver_config.py
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Data Files & Storage
+data_source/*.xlsx
+data_source/*.csv
+minio_data/
+postgres_data/
+
+# OS specific files
+.DS_Store
+Thumbs.db
