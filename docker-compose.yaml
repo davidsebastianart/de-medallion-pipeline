@@ -1,0 +1,115 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.10
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqJZPo=
+    - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
+    - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    - AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    - _PIP_ADDITIONAL_REQUIREMENTS=pandas pyarrow fastparquet boto3 psycopg2-binary
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./data_source:/opt/airflow/data_source
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+  networks:
+    - medallion-network
+
+services:
+  # 1. Database Metadata Airflow
+  airflow-postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - medallion-network
+
+  # 2. Inisialisasi Database Airflow
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      - _AIRFLOW_DB_MIGRATE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+    networks:
+      - medallion-network
+
+  # 3. Airflow Webserver (UI)
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 4. Airflow Scheduler (Pemicu & Penjadwal Task)
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 5. MinIO Object Storage (Data Lakehouse: Bronze, Silver, Gold Parquet)
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"       # API Port (untuk diakses oleh boto3/Airflow)
+      - "9001:9001"       # Web Console Port (untuk browser lokal)
+    volumes:
+      - minio-data:/data
+    networks:
+      - medallion-network
+
+  # 6. PostgreSQL Target Data Warehouse (Serving Layer Analitik)
+  warehouse-postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5433:5432"       # Port host 5433 agar tidak bentrok dengan metadata Airflow
+    volumes:
+      - warehouse-postgres-data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    networks:
+      - medallion-network
+
+volumes:
+  airflow-postgres-data:
+  minio-data:
+  warehouse-postgres-data:
+
+networks:
+  medallion-network:
+    driver: bridge
