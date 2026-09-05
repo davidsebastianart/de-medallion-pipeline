@@ -70,6 +70,15 @@ flowchart TD
 
 ---
 
+## Dataset Source
+
+The dataset used in this project is the **Online Retail II** dataset sourced from the **[UCI Machine Learning Repository / Kaggle](https://www.kaggle.com/datasets/mashlyn/online-retail-ii-uci)**.
+* **Domain:** Non-store online retail based in the UK.
+* **Period:** Transacted between 01/12/2009 and 09/12/2011.
+* **Attributes:** Invoice number, StockCode, Description, Quantity, InvoiceDate, Price, Customer ID, and Country.
+
+---
+
 ## Tech Stack
 
 * **Orchestration:** Apache Airflow 2.9 (LocalExecutor)
