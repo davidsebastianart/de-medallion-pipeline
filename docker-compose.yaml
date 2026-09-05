@@ -22,7 +22,7 @@ x-airflow-common: &airflow-common
     - medallion-network
 
 services:
-  # 1. Database Metadata Airflow
+  # Airflow metadata backend
   airflow-postgres:
     image: postgres:15
     environment:
@@ -38,7 +38,7 @@ services:
     networks:
       - medallion-network
 
-  # 2. Inisialisasi Database Airflow
+  # Database migration & bootstrap service
   airflow-init:
     <<: *airflow-common
     command: version
@@ -50,7 +50,7 @@ services:
     networks:
       - medallion-network
 
-  # 3. Airflow Webserver (UI)
+  # Web management interface
   airflow-webserver:
     <<: *airflow-common
     command: webserver
@@ -66,7 +66,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # 4. Airflow Scheduler (Pemicu & Penjadwal Task)
+  # Pipeline orchestrator & scheduler daemon
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
@@ -75,7 +75,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # 5. MinIO Object Storage (Data Lakehouse: Bronze, Silver, Gold Parquet)
+  # S3-compatible Lakehouse storage
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -83,14 +83,14 @@ services:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
     ports:
-      - "9000:9000"       # API Port (untuk diakses oleh boto3/Airflow)
-      - "9001:9001"       # Web Console Port (untuk browser lokal)
+      - "9000:9000"       # S3 API endpoint for Airflow/boto3 client
+      - "9001:9001"       # Web console management interface
     volumes:
       - minio-data:/data
     networks:
       - medallion-network
 
-  # 6. PostgreSQL Target Data Warehouse (Serving Layer Analitik)
+  # Serving layer analytical warehouse
   warehouse-postgres:
     image: postgres:15
     environment:
@@ -98,7 +98,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
     ports:
-      - "5433:5432"       # Port host 5433 agar tidak bentrok dengan metadata Airflow
+      - "5433:5432"       # Exposed on 5433 to prevent collision with metadata DB
     volumes:
       - warehouse-postgres-data:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d
