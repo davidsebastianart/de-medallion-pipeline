@@ -8,12 +8,12 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
-# Konfigurasi Koneksi MinIO
+# MinIO connection config
 MINIO_ENDPOINT = "http://minio:9000"
 MINIO_ACCESS_KEY = "minioadmin"
 MINIO_SECRET_KEY = "minioadmin"
 
-# Konfigurasi Target PostgreSQL Warehouse
+# Target PostgreSQL warehouse config
 PG_HOST = "warehouse-postgres"
 PG_PORT = 5432
 PG_DB = "warehouse"
@@ -30,7 +30,7 @@ def get_s3_client():
 
 def ingest_to_bronze():
     raw_file_path = "/opt/airflow/data_source/raw_data.csv"
-    print(f"Membaca data dari {raw_file_path}...")
+    print(f"Reading raw data from {raw_file_path}...")
     df = pd.read_csv(raw_file_path, encoding="ISO-8859-1")
     
     parquet_buffer = io.BytesIO()
@@ -40,13 +40,14 @@ def ingest_to_bronze():
     s3_client = get_s3_client()
     target_key = "raw_retail_data.parquet"
     s3_client.put_object(Bucket="bronze", Key=target_key, Body=parquet_buffer.getvalue())
-    print(f"Berhasil mengunggah data Bronze ke s3://bronze/{target_key} ({len(df)} baris)")
+    print(f"Landed Bronze dataset to s3://bronze/{target_key} ({len(df)} rows)")
 
 def transform_to_silver():
     s3_client = get_s3_client()
     response = s3_client.get_object(Bucket="bronze", Key="raw_retail_data.parquet")
     df = pd.read_parquet(io.BytesIO(response["Body"].read()))
     
+    # Normalize schema naming conventions
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
     column_mapping = {
         "invoice": "invoice_no",
@@ -60,7 +61,7 @@ def transform_to_silver():
     }
     df = df.rename(columns=column_mapping)
     
-    # Cleaning
+    # Data cleansing & contract enforcement
     df = df.dropna(subset=["customer_id", "description"])
     df["invoice_no"] = df["invoice_no"].astype(str)
     df = df[~df["invoice_no"].str.startswith("C")]
@@ -69,6 +70,7 @@ def transform_to_silver():
     df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce")
     df = df[(df["quantity"] > 0) & (df["unit_price"] > 0)]
     
+    # Cast types and derive transaction total
     df["customer_id"] = df["customer_id"].astype(float).astype(int).astype(str)
     df["stock_code"] = df["stock_code"].astype(str)
     df["invoice_date"] = pd.to_datetime(df["invoice_date"])
@@ -80,23 +82,19 @@ def transform_to_silver():
     silver_buffer.seek(0)
     
     s3_client.put_object(Bucket="silver", Key="cleaned_retail_data.parquet", Body=silver_buffer.getvalue())
-    print(f"Berhasil mengunggah data Silver ({len(df)} baris)")
+    print(f"Landed Silver dataset ({len(df)} rows)")
 
 def transform_to_gold():
     s3_client = get_s3_client()
     response = s3_client.get_object(Bucket="silver", Key="cleaned_retail_data.parquet")
     df = pd.read_parquet(io.BytesIO(response["Body"].read()))
     
-    # 1. Dim Product (Deduped)
+    # Build star schema entities
     dim_product = df[["stock_code", "description"]].drop_duplicates(subset=["stock_code"])
-    
-    # 2. Dim Customer (Deduped)
     dim_customer = df[["customer_id", "country"]].drop_duplicates(subset=["customer_id"])
-    
-    # 3. Fact Sales
     fct_sales = df[["invoice_no", "stock_code", "customer_id", "invoice_date", "quantity", "unit_price", "total_amount"]]
     
-    # Simpan ketiganya ke Gold Bucket
+    # Persist dimension and fact tables to Gold storage
     tables = {
         "dim_product.parquet": dim_product,
         "dim_customer.parquet": dim_customer,
@@ -108,12 +106,12 @@ def transform_to_gold():
         table_df.to_parquet(buf, engine="pyarrow", index=False)
         buf.seek(0)
         s3_client.put_object(Bucket="gold", Key=filename, Body=buf.getvalue())
-        print(f"Uploaded s3://gold/{filename} ({len(table_df)} baris)")
+        print(f"Uploaded s3://gold/{filename} ({len(table_df)} rows)")
 
 def load_gold_to_postgres():
     s3_client = get_s3_client()
     
-    # Download Parquet files dari Gold
+    # Fetch Gold layer parquet artifacts
     dim_prod_obj = s3_client.get_object(Bucket="gold", Key="dim_product.parquet")
     dim_cust_obj = s3_client.get_object(Bucket="gold", Key="dim_customer.parquet")
     fct_sales_obj = s3_client.get_object(Bucket="gold", Key="fct_sales.parquet")
@@ -131,7 +129,7 @@ def load_gold_to_postgres():
     )
     cursor = conn.cursor()
     
-    # Pastikan tabel dibuat jika container postgres baru aktif
+    # Ensure warehouse tables exist
     ddl_query = """
     CREATE TABLE IF NOT EXISTS dim_product (
         stock_code VARCHAR(50) PRIMARY KEY,
@@ -154,19 +152,18 @@ def load_gold_to_postgres():
     cursor.execute(ddl_query)
     conn.commit()
     
-    # Bersihkan tabel sebelum load (Idempotent Run)
+    # Enforce idempotency via full refresh
     cursor.execute("TRUNCATE TABLE fct_sales, dim_product, dim_customer;")
     conn.commit()
     
-    # Batch Insert: dim_product
+    # Batch load dimensions
     prod_data = [tuple(x) for x in dim_product.values]
     execute_values(cursor, "INSERT INTO dim_product (stock_code, description) VALUES %s", prod_data)
     
-    # Batch Insert: dim_customer
     cust_data = [tuple(x) for x in dim_customer.values]
     execute_values(cursor, "INSERT INTO dim_customer (customer_id, country) VALUES %s", cust_data)
     
-    # Batch Insert: fct_sales
+    # Batch load fact table
     fct_sales["invoice_date"] = fct_sales["invoice_date"].astype(str)
     sales_data = [tuple(x) for x in fct_sales.values]
     execute_values(
@@ -179,7 +176,7 @@ def load_gold_to_postgres():
     conn.commit()
     cursor.close()
     conn.close()
-    print("Seluruh tabel analitik Star Schema berhasil dimuat ke PostgreSQL!")
+    print("Successfully populated star schema tables into PostgreSQL warehouse.")
 
 default_args = {
     "owner": "airflow",
@@ -217,5 +214,5 @@ with DAG(
         python_callable=load_gold_to_postgres,
     )
 
-    # Lineage lengkap: Bronze -> Silver -> Gold -> PostgreSQL Warehouse
+    # Pipeline lineage: Bronze -> Silver -> Gold -> PostgreSQL Warehouse
     bronze_task >> silver_task >> gold_task >> load_postgres_task
